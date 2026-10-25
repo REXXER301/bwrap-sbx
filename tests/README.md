@@ -12,6 +12,9 @@ tests/run.sh 20 50      # only suites whose file name contains 20 or 50
 Requires rootless `podman` on the host. The first build pulls `archlinux:latest` and installs
 `bubblewrap` and `socat`, so it needs network. The test run itself does not.
 
+CI runs the same `tests/run.sh` on GitHub Actions (`.github/workflows/isolation-tests.yml`)
+for pushes to `main` and pull requests that touch `sbx` or `tests/`.
+
 ## Safety
 
 - **Nothing from the host is mounted** into the container (no `-v`), and it runs with
@@ -31,7 +34,8 @@ Requires rootless `podman` on the host. The first build pulls `archlinux:latest`
 
 bwrap must mount a fresh `/proc` inside the container. `run.sh` first tries podman with only
 `--security-opt unmask=/proc/*`. If bwrap can't start that way, it falls back to also
-disabling seccomp and SELinux labels for the container, and prints which options it used.
+disabling seccomp, SELinux labels and the AppArmor profile for the container, and prints
+which options it used.
 Both options stay inside podman's rootless user namespace.
 
 ## How a check proves something
