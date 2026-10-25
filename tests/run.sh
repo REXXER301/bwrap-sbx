@@ -48,4 +48,14 @@ done
 echo "run.sh: podman security options: ${sec[*]}"
 
 [[ -t 1 ]] && base+=(-t)
-exec podman "${base[@]}" "${sec[@]}" "$image" /opt/sbx-tests/run-tests.sh "$@"
+cmd=(podman "${base[@]}" "${sec[@]}" "$image" /opt/sbx-tests/run-tests.sh "$@")
+
+[[ -n ${GITHUB_STEP_SUMMARY-} ]] || exec "${cmd[@]}"
+
+# On GitHub Actions, also write the results to the job summary page.
+log=$(mktemp)
+rc=0
+"${cmd[@]}" | tee "$log" || rc=$?
+awk -v rc="$rc" -f "$here/job-summary.awk" "$log" >>"$GITHUB_STEP_SUMMARY"
+rm -f -- "$log"
+exit "$rc"
