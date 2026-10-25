@@ -1,0 +1,37 @@
+# Test image for sbx. sbx runs *inside* this container, so the container plays
+# the part of "the host": every file the suite probes belongs to the container,
+# never to the real machine. Built and started by tests/run.sh.
+FROM docker.io/library/archlinux:latest
+
+RUN pacman -Syu --noconfirm --needed \
+        bash bubblewrap coreutils diffutils findutils gawk grep sed socat util-linux
+
+RUN useradd -m -u 1000 -s /usr/bin/bash tester
+
+COPY sbx /usr/local/bin/sbx
+COPY tests/ /opt/sbx-tests/
+RUN chmod 755 /usr/local/bin/sbx /opt/sbx-tests/*.sh \
+ && chmod -R a+rX,go-w /opt/sbx-tests
+
+# Canary files. Each one and its folder belong to the test user, so outside sbx
+# the test user may change or delete them: if a change fails inside sbx, sbx
+# blocked it, not file permissions. The suite only ever targets these files.
+RUN set -e; \
+    for d in /etc/sbx-canary /usr/share/sbx-canary /opt/sbx-canary /mnt/sbx-canary \
+             /srv/sbx-canary /home/tester/work /home/tester/work/proj \
+             /home/tester/work/other-project /home/tester/ro-share; do \
+        mkdir -p "$d"; chown tester:tester "$d"; chmod 755 "$d"; \
+    done; \
+    for f in /etc/sbx-canary/canary.txt /usr/share/sbx-canary/canary.txt \
+             /opt/sbx-canary/canary.txt /mnt/sbx-canary/canary.txt /srv/sbx-canary/canary.txt \
+             /home/tester/canary.txt /home/tester/work/other-project/canary.txt \
+             /home/tester/ro-share/canary.txt; do \
+        printf 'sbx canary: must never change\n' >"$f"; chown tester:tester "$f"; chmod 666 "$f"; \
+    done; \
+    printf 'project file\n' >/home/tester/work/proj/existing.txt; \
+    chown tester:tester /home/tester/work/proj/existing.txt
+
+USER tester
+WORKDIR /home/tester/work/proj
+ENV SBX_TEST_CONTAINER=1 SHELL=/usr/bin/bash
+CMD ["/opt/sbx-tests/run-tests.sh"]

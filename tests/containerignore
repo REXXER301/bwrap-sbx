@@ -1,0 +1,4 @@
+# Build context for tests/Containerfile: only the script under test and the suite.
+*
+!sbx
+!tests
