@@ -4,9 +4,10 @@ Runs `sbx` inside a WSL2 distro on Windows 11. It's the same script as on native
 it detects WSL by itself. The guarantee is the same as on Linux: only `$PWD` is writable inside the
 sandbox. Your Windows drives (`/mnt/c`, …) don't exist in there at all.
 
-> **Note:** Only processes started through `sbx` are confined. If you start a process
+> [!WARNING]
+> Only processes started through `sbx` are confined. If you start a process
 > without this prefix, it is **not** sandboxed, and the WSL distro itself can read and write
-> all of `C:`. That includes programs the sandbox created (see [What runs where](#what-runs-where)).
+> all of `C:`. That includes programs created inside the sandbox (see [What runs where](#what-runs-where)).
 
 ---
 

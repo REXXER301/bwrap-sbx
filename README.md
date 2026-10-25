@@ -12,6 +12,10 @@ libraries and certificates work inside without installing anything. Your home di
 other drives and host processes are not visible. The network is shared unless you pass
 `--offline`.
 
+> [!WARNING]
+> **Not a security guarantee.** sbx reduces the risk of agents
+> and untrusted code, but it is **not** a full VM. See [threat model](#threat-model).
+
 Minimal overhead with one bash script, no daemon, image or root. Startup takes a few milliseconds.
 
 ## What it does
