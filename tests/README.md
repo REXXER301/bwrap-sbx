@@ -9,8 +9,17 @@ tests/run.sh            # build the image, run every suite
 tests/run.sh 20 50      # only suites whose file name contains 20 or 50
 ```
 
+`00-preconditions` always runs first. If any of its control checks fail, the run stops there,
+because the later results wouldn't prove anything. A run where no suite matches fails instead
+of passing with nothing checked.
+
 Requires rootless `podman` on the host. The first build pulls `archlinux:latest` and installs
 `bubblewrap` and `socat`, so it needs network. The test run itself does not.
+
+CI runs the same `tests/run.sh` on GitHub Actions (`.github/workflows/isolation-tests.yml`)
+for pushes to `main` and pull requests that touch `sbx` or `tests/`. There, `run.sh` also
+writes the results to the run's job summary page: counts, failed and known checks, and a
+table of every check.
 
 ## Safety
 
@@ -31,7 +40,8 @@ Requires rootless `podman` on the host. The first build pulls `archlinux:latest`
 
 bwrap must mount a fresh `/proc` inside the container. `run.sh` first tries podman with only
 `--security-opt unmask=/proc/*`. If bwrap can't start that way, it falls back to also
-disabling seccomp and SELinux labels for the container, and prints which options it used.
+disabling seccomp, SELinux labels and the AppArmor profile for the container, and prints
+which options it used.
 Both options stay inside podman's rootless user namespace.
 
 ## How a check proves something
@@ -68,4 +78,5 @@ abstract unix sockets. They don't count as failures.
 - `run.sh`: host side. Builds the image, picks the podman options, runs the suite.
 - `Containerfile`, `containerignore`: the test image. The build context is only `sbx` and `tests/`.
 - `preflight.sh`: tells whether bwrap can start in the container.
+- `job-summary.awk`: turns the suite's output into the GitHub Actions job summary.
 - `run-tests.sh`, `lib.sh`, `suite/*.sh`: the suite. Runs inside the container only.

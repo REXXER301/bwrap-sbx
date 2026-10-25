@@ -27,11 +27,12 @@ base=(run --rm --network none --cap-drop ALL --pids-limit 1024 --memory 1g)
 
 # bwrap mounts a fresh /proc for the sandbox, which the kernel only allows
 # when the container's own /proc has nothing masked over it. Try the narrowest
-# option first; the fallback also drops seccomp and SELinux labels, which some
-# hosts need for nested namespaces. Both stay inside the rootless user namespace.
+# option first; the fallback also drops seccomp, SELinux labels and the AppArmor
+# profile (Ubuntu's denies mounts), which some hosts need for nested namespaces.
+# Both stay inside the rootless user namespace.
 profiles=(
     "--security-opt unmask=/proc/*"
-    "--security-opt unmask=ALL --security-opt seccomp=unconfined --security-opt label=disable"
+    "--security-opt unmask=ALL --security-opt seccomp=unconfined --security-opt label=disable --security-opt apparmor=unconfined"
 )
 sec=()
 for p in "${profiles[@]}"; do
@@ -47,4 +48,14 @@ done
 echo "run.sh: podman security options: ${sec[*]}"
 
 [[ -t 1 ]] && base+=(-t)
-exec podman "${base[@]}" "${sec[@]}" "$image" /opt/sbx-tests/run-tests.sh "$@"
+cmd=(podman "${base[@]}" "${sec[@]}" "$image" /opt/sbx-tests/run-tests.sh "$@")
+
+[[ -n ${GITHUB_STEP_SUMMARY-} ]] || exec "${cmd[@]}"
+
+# On GitHub Actions, also write the results to the job summary page.
+log=$(mktemp)
+rc=0
+"${cmd[@]}" | tee "$log" || rc=$?
+awk -v rc="$rc" -f "$here/job-summary.awk" "$log" >>"$GITHUB_STEP_SUMMARY"
+rm -f -- "$log"
+exit "$rc"
