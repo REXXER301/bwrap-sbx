@@ -1,0 +1,537 @@
+#!/usr/bin/env bash
+# sbx — minimal bubblewrap sandbox rooted at $PWD. Linux and WSL2.
+#
+#   sbx                           interactive shell inside the sandbox, internet on
+#   sbx -- CMD ARGS...            run CMD inside the sandbox
+#   sbx --offline -- CMD          no network at all; llama.cpp still at 127.0.0.1:8001
+#   sbx --gpu -- CMD              expose the GPU (/dev/nvidia*, /dev/dri, /dev/dxg on WSL)
+#   sbx --ro ~/models -- CMD      share a host folder read-only (repeatable)
+#   sbx --offline --publish 8188 -- CMD           expose one sandbox port on localhost
+#   sbx --offline --publish 0.0.0.0:8188 \
+#       --allow 192.168.1.0/24 -- CMD             ... or to the LAN, limited to a subnet
+#   sbx --no-userns -- CMD        forbid nested sandboxes (not for claude/codex)
+#   sbx --port 8081 -- CMD        local model port (default 8001)
+#
+#   Coding agents, installed into the project on first run:
+#   sbx -- pi                     pi, preconfigured for the local llama.cpp server
+#   sbx -- claude                 Claude Code
+#   sbx --share-auth -- claude    reuse the host login (see warning in the README)
+#   sbx --host-claude -- claude   run the host's claude binary, install nothing
+#   sbx -- codex                  OpenAI Codex CLI
+#   sbx -- codex login --device-auth   one-time login per project
+#
+# Design goals: only $PWD is writable, and it keeps its real path so venvs stay
+# valid outside. $HOME, /mnt, / and everything else are absent or read-only.
+# The environment is cleared; pass extra variables with SBX_ENV="NAME1 NAME2".
+# Telemetry is off by default for the agents and common tools; SBX_TELEMETRY=1 allows it.
+# Not a VM: see "What this does not protect against" in the README.
+# Requires: bubblewrap (+ socat for --offline / --publish).
+
+set -u
+
+usage() { sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; }
+
+offline=0
+gpu=0
+port=8001
+share_auth=0
+host_claude=0
+no_userns=0
+allow=""
+publish=()
+ro_paths=()
+cmd=()
+
+while (($#)); do
+    case $1 in
+        --offline)     offline=1 ;;
+        --gpu)         gpu=1 ;;
+        --share-auth)  share_auth=1 ;;
+        --host-claude) host_claude=1 ;;
+        --no-userns)   no_userns=1 ;;
+        --port)        port=${2:?sbx: --port needs a value}; shift ;;
+        --publish)     publish+=("${2:?sbx: --publish needs [ADDR:]PORT}"); shift ;;
+        --allow)       allow=${2:?sbx: --allow needs a CIDR, e.g. 192.168.1.0/24}; shift ;;
+        --ro)          ro_paths+=("${2:?sbx: --ro needs a path}"); shift ;;
+        -h|--help)     usage; exit 0 ;;
+        --)            shift; cmd=("$@"); break ;;
+        -*)            echo "sbx: unknown option '$1' (sbx --help)" >&2; exit 2 ;;
+        *)             cmd=("$@"); break ;;
+    esac
+    shift
+done
+
+[[ $port =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) \
+    || { echo "sbx: --port: '$port' is not a port number" >&2; exit 2; }
+# Spliced into socat's option list, where a comma would start a new option.
+[[ -z $allow || $allow =~ ^[0-9A-Fa-f.:/]+$ ]] \
+    || { echo "sbx: --allow: '$allow' is not an address or CIDR" >&2; exit 2; }
+
+command -v bwrap >/dev/null || { echo "sbx: bubblewrap not installed" >&2; exit 1; }
+
+is_wsl=0
+grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && is_wsl=1
+
+# The interactive shell (and $SHELL for agents) follows the host's login shell,
+# as long as it lives in /usr and is therefore visible inside.
+sbx_shell=$(readlink -f "${SHELL:-/usr/bin/bash}" 2>/dev/null)
+[[ $sbx_shell == /usr/* && -x $sbx_shell ]] || sbx_shell=/usr/bin/bash
+sbx_shell=${SBX_SHELL:-$sbx_shell}
+((${#cmd[@]})) || cmd=("$sbx_shell")
+
+root=$(pwd -P)
+home=$root/.sbx-home
+real_home=$(readlink -f "$HOME")
+
+# Never make the whole filesystem, the shared /tmp, or home (or a parent of it)
+# the sandbox: that would expose far more than one project.
+unsafe_path() {
+    [[ $1 == / || $1 == /tmp || $real_home == "$1" || $real_home == "$1"/* ]]
+}
+
+if unsafe_path "$root"; then
+    echo "sbx: refusing to run in $root — cd into a project directory first" >&2
+    exit 1
+fi
+
+case $root in
+    /mnt/?/*) ((is_wsl)) && echo "sbx: note: project is on a Windows drive ($root) — works, but file I/O is slow there" >&2 ;;
+esac
+
+if [[ ! -d $home ]]; then
+    mkdir -p "$home"
+    echo "sbx: created $home"
+fi
+
+# .sbx-home collects logins and tokens; keep it out of git without relying on
+# the project's own .gitignore.
+[[ -e $home/.gitignore ]] || printf '*\n' >"$home/.gitignore"
+
+# Prompt markers for the interactive shell; only written if absent.
+[[ -f $home/.bashrc ]] || printf '%s\n' "PS1='(sbx) \\w \\\$ '" >"$home/.bashrc"
+if [[ ! -f $home/.config/fish/conf.d/sbx.fish ]]; then
+    mkdir -p "$home/.config/fish/conf.d"
+    printf '%s\n' "function fish_right_prompt; set_color brblack; echo '(sbx)'; set_color normal; end" \
+        >"$home/.config/fish/conf.d/sbx.fish"
+fi
+
+sbx_path="$home/.local/bin:$home/.npm-global/bin:/opt/claude/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
+# WSL ships nvidia-smi and the CUDA user-space libraries here.
+((gpu)) && [[ -d /usr/lib/wsl/lib ]] && sbx_path+=":/usr/lib/wsl/lib"
+
+# ---- base sandbox -----------------------------------------------------------
+# usr/lib64 and usr/sbin are real directories on Ubuntu/Debian and symlinks on
+# Arch, so these targets resolve correctly on both.
+bw=(
+    --clearenv
+    --ro-bind /usr /usr
+    --ro-bind /etc /etc
+    --symlink usr/lib /lib
+    --symlink usr/lib64 /lib64
+    --symlink usr/bin /bin
+    --symlink usr/sbin /sbin
+    --proc /proc
+    --dev /dev
+    --tmpfs /dev/shm
+    --tmpfs /run
+    --tmpfs /var
+    --tmpfs /tmp
+    --bind "$root" "$root"
+    --chdir "$root"
+    --setenv HOME "$home"
+    --setenv USER "${USER:-sbx}"
+    --setenv SHELL "$sbx_shell"
+    --setenv PATH "$sbx_path"
+    --setenv TERM "${TERM:-xterm-256color}"
+    --setenv LANG "${LANG:-C.UTF-8}"
+    --setenv TMPDIR /tmp
+    --setenv SBX 1
+    --setenv OPENAI_BASE_URL "http://127.0.0.1:$port/v1"
+    --setenv OPENAI_API_KEY sbx
+    --unshare-all
+    --die-with-parent
+)
+
+# ---- telemetry --------------------------------------------------------------
+# Default: no telemetry, for the agents and for common tools run inside.
+# Auto-updates stay on. SBX_TELEMETRY=1 on the host skips all of this.
+# Claude Code: DISABLE_* are opt-outs by presence, so "0" would still opt out.
+if [[ ${SBX_TELEMETRY:-0} != 1 ]]; then
+    bw+=(
+        --setenv DO_NOT_TRACK 1
+        --setenv DISABLE_TELEMETRY 1
+        --setenv DISABLE_ERROR_REPORTING 1
+        --setenv DISABLE_FEEDBACK_COMMAND 1
+        --setenv CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY 1
+        --setenv PI_OFFLINE 1
+        --setenv PI_TELEMETRY 0
+        --setenv PI_SKIP_VERSION_CHECK 1
+        --setenv HF_HUB_DISABLE_TELEMETRY 1
+        --setenv GRADIO_ANALYTICS_ENABLED False
+        --setenv NEXT_TELEMETRY_DISABLED 1
+        --setenv DOTNET_CLI_TELEMETRY_OPTOUT 1
+    )
+fi
+
+# Explicit pass-through only: nothing from the host environment leaks in by
+# default, API keys included (SBX_ENV="ANTHROPIC_API_KEY" to pass one).
+for v in COLORTERM ${SBX_ENV:-}; do
+    [[ $v =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "sbx: SBX_ENV: '$v' is not a variable name" >&2; continue; }
+    [[ -n ${!v-} ]] && bw+=(--setenv "$v" "${!v}")
+done
+
+# ---- read-only host folders (--ro) ------------------------------------------
+# Mounted at their real path, so absolute paths in configs keep working.
+for p in "${ro_paths[@]}"; do
+    rp=$(readlink -f "$p" 2>/dev/null)
+    if [[ -z $rp || ! -e $rp ]]; then
+        echo "sbx: --ro: $p does not exist" >&2; exit 1
+    fi
+    if unsafe_path "$rp"; then
+        echo "sbx: --ro: refusing to expose $rp — pick a specific folder" >&2; exit 1
+    fi
+    # It would be mounted over the project and make it read-only too.
+    if [[ $root == "$rp"/* ]]; then
+        echo "sbx: --ro: $rp contains the project — pick a folder beside it" >&2; exit 1
+    fi
+    bw+=(--ro-bind "$rp" "$rp")
+done
+
+# ---- no nested user namespaces (--no-userns) --------------------------------
+# Removes a common kernel attack surface. Claude Code and Codex need user
+# namespaces for their own inner sandboxes, so don't combine it with them.
+if ((no_userns)); then
+    if ! bwrap --help 2>&1 | grep -q -- --disable-userns; then
+        echo "sbx: --no-userns needs bubblewrap 0.8 or newer" >&2; exit 1
+    fi
+    case ${cmd[0]} in
+        claude|codex) echo "sbx: --no-userns: ${cmd[0]}'s own sandbox will not work; sbx stays the boundary" >&2 ;;
+    esac
+    bw+=(--unshare-user --disable-userns)
+fi
+
+# ---- gpu --------------------------------------------------------------------
+# Native Linux: /dev/nvidia* and /dev/dri. WSL: /dev/dxg, with the CUDA
+# libraries under /usr/lib/wsl, which the /usr bind already covers.
+if ((gpu)); then
+    found=0
+    for dev in /dev/dxg /dev/nvidia* /dev/dri; do
+        [[ -e $dev ]] && { bw+=(--dev-bind "$dev" "$dev"); found=1; }
+    done
+    ((found)) || echo "sbx: --gpu: no /dev/dxg, /dev/nvidia* or /dev/dri found" >&2
+fi
+
+# ---- host claude binary (--host-claude) -------------------------------------
+# Bind the host's installed claude read-only instead of putting a ~150 MB copy
+# in every project. Auto-update is off: the binary is not writable here.
+if ((host_claude)); then
+    hc=$(command -v claude || true)
+    [[ -n $hc ]] && hc=$(readlink -f "$hc")
+    if [[ -z $hc || ! -x $hc ]]; then
+        echo "sbx: --host-claude: no usable claude on the host PATH" >&2
+        exit 1
+    fi
+    bw+=(--ro-bind "$hc" /opt/claude/bin/claude --setenv DISABLE_AUTOUPDATER 1)
+fi
+
+# ---- host login (--share-auth) ----------------------------------------------
+# WARNING: ~/.claude.json can hold MCP server definitions that later run
+# OUTSIDE the sandbox. Making it writable from inside weakens the guarantee.
+if ((share_auth)); then
+    echo "sbx: --share-auth: ~/.claude.json is writable from inside — it can hold MCP servers that run outside the sandbox" >&2
+    hj=$HOME/.claude.json
+    hcred=$HOME/.claude/.credentials.json
+    [[ -f $hj || -f $hcred ]] || echo "sbx: --share-auth: no ~/.claude.json or ~/.claude/.credentials.json on the host" >&2
+    if [[ -f $hj ]]; then
+        [[ -f $home/.claude.json ]] || echo '{}' >"$home/.claude.json"
+        bw+=(--bind "$hj" "$home/.claude.json")
+    fi
+    if [[ -f $hcred ]]; then
+        mkdir -p "$home/.claude"
+        touch "$home/.claude/.credentials.json"
+        bw+=(--bind "$hcred" "$home/.claude/.credentials.json")
+    fi
+fi
+
+# ---- network ----------------------------------------------------------------
+bridge_pid=0
+pub_pids=()
+pub_ports=()
+run_dir=""
+
+cleanup() {
+    ((bridge_pid)) && kill "$bridge_pid" 2>/dev/null
+    ((${#pub_pids[@]})) && kill "${pub_pids[@]}" 2>/dev/null
+    [[ -n $run_dir ]] && rm -rf "$run_dir"
+    # empty mountpoint left by --share-auth would confuse a later run without it
+    if ((share_auth)); then
+        local c=$home/.claude/.credentials.json
+        [[ -f $c && ! -s $c ]] && rm -f "$c"
+    fi
+}
+trap cleanup EXIT
+
+if ((offline)); then
+    # No network namespace at all. llama.cpp is reached through a unix socket
+    # bridged in from the host, re-exposed on the sandbox's own loopback.
+    # The socket lives in a fresh private directory per session, so other users
+    # can't pre-create it and concurrent sessions don't share it.
+    command -v socat >/dev/null || { echo "sbx: --offline needs socat" >&2; exit 1; }
+    rt=/tmp
+    [[ -d ${XDG_RUNTIME_DIR-} && -w $XDG_RUNTIME_DIR ]] && rt=$XDG_RUNTIME_DIR
+    run_dir=$(mktemp -d "$rt/sbx-XXXXXX") || exit 1
+    sock=$run_dir/sbx-llama.sock
+    socat UNIX-LISTEN:"$sock",fork,mode=600 TCP:127.0.0.1:"$port" 2>/dev/null &
+    bridge_pid=$!
+    for _ in {1..40}; do
+        [[ -S $sock ]] || ! kill -0 "$bridge_pid" 2>/dev/null && break
+        sleep 0.05
+    done
+    [[ -S $sock ]] || { echo "sbx: --offline: the socat bridge to port $port did not start" >&2; exit 1; }
+    bw+=(--bind "$sock" /tmp/llama.sock)
+
+    # Inbound only: for each published port, socat inside the sandbox turns the
+    # sandbox-private 127.0.0.1:PORT into a unix socket, and socat out here
+    # listens on the real address and forwards to it. Connections can only be
+    # opened from outside; the sandbox still has no route anywhere.
+    if ((${#publish[@]})); then
+        pub_dir=$run_dir/pub
+        mkdir "$pub_dir" || exit 1
+        bw+=(--bind "$pub_dir" /run/sbx-pub)
+        for spec in "${publish[@]}"; do
+            if [[ $spec == *:* ]]; then addr=${spec%:*}; p=${spec##*:}; else addr=127.0.0.1; p=$spec; fi
+            [[ $p =~ ^[0-9]+$ ]] && ((p >= 1 && p <= 65535)) \
+                || { echo "sbx: --publish: bad port in '$spec'" >&2; exit 1; }
+            opts="bind=$addr,fork,reuseaddr"
+            [[ -n $allow ]] && opts+=",range=$allow"
+            if [[ $addr != 127.* && -z $allow ]]; then
+                echo "sbx: warning: $addr:$p is open to every device that can reach it — consider --allow <subnet>" >&2
+            fi
+            socat TCP-LISTEN:"$p","$opts" UNIX-CONNECT:"$pub_dir/$p.sock" 2>/dev/null &
+            pub_pids+=($!)
+            pub_ports+=("$p")
+            # A listener that can't bind (port taken, privileged) exits at once.
+            sleep 0.1
+            kill -0 $! 2>/dev/null || { echo "sbx: --publish: could not listen on $addr:$p" >&2; exit 1; }
+            echo "sbx: publishing sandbox port $p on $addr:$p${allow:+ (clients: $allow)}"
+        done
+    fi
+else
+    if ((${#publish[@]})); then
+        echo "sbx: --publish only works with --offline. Online, the sandbox shares the network:" >&2
+        echo "     ports are reachable directly (and the sandbox can reach everything else too)." >&2
+        exit 1
+    fi
+    # Shares the host netns, so llama.cpp is already on 127.0.0.1:$port.
+    bw+=(--share-net --ro-bind-try /run/systemd/resolve /run/systemd/resolve)
+    # /etc/resolv.conf is often a symlink into /run (systemd-resolved) or
+    # /mnt/wsl (WSL), both hidden here. Bind just the target file so DNS works.
+    rcf=$(readlink -f /etc/resolv.conf)
+    if [[ -n $rcf && $rcf != /etc/resolv.conf && -f $rcf ]]; then
+        bw+=(--ro-bind "$rcf" "$rcf")
+    fi
+fi
+
+# ---- agent instructions -----------------------------------------------------
+# User-level memory for claude (CLAUDE.md) and codex (AGENTS.md). Copied from
+# ~/.config/sbx/AGENTS.md on the host if that exists, otherwise a generic
+# default. Only written if absent; edit or delete freely.
+write_agent_memory() {
+    [[ -f $1 ]] && return
+    mkdir -p "$(dirname "$1")"
+    local tpl=${XDG_CONFIG_HOME:-$HOME/.config}/sbx/AGENTS.md
+    if [[ -f $tpl ]]; then
+        cp "$tpl" "$1"
+    elif ((is_wsl)); then
+        printf 'Shell: %s inside a bubblewrap sandbox in WSL2 (Linux userland, no Windows drives visible).\nOnly the project directory is writable.\n' "${sbx_shell##*/}" >"$1"
+    else
+        printf 'Shell: %s inside a bubblewrap sandbox. Only the project directory is writable.\n' "${sbx_shell##*/}" >"$1"
+    fi
+    echo "sbx: wrote $1"
+}
+
+# ---- pi bootstrap -----------------------------------------------------------
+# Runs only when the command is `pi`, and only for whatever is missing.
+if [[ ${cmd[0]} == pi ]]; then
+    pi_bin=$home/.npm-global/bin/pi
+    pi_dir=$home/.pi/agent
+
+    if [[ ! -x $pi_bin ]]; then
+        if ((offline)); then
+            echo "sbx: pi not installed yet — run 'sbx -- pi' once online first." >&2
+            exit 1
+        fi
+        command -v npm >/dev/null || { echo "sbx: pi install needs npm on the host" >&2; exit 1; }
+        echo "sbx: installing pi into $home/.npm-global ..."
+        bwrap "${bw[@]}" -- bash -c 'npm config set prefix "$HOME/.npm-global" && npm install -g --ignore-scripts @earendil-works/pi-coding-agent' \
+            || exit 1
+    fi
+
+    if [[ ! -f $pi_dir/models.json ]]; then
+        mkdir -p "$pi_dir"
+        mid=$(curl -sm2 "http://127.0.0.1:$port/v1/models" \
+            | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        nctx=$(curl -sm2 "http://127.0.0.1:$port/props" \
+            | grep -o '"n_ctx"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -o '[0-9]*$')
+        [[ -n $mid ]] || mid=local-model
+        [[ -n $nctx ]] || nctx=131072
+        mtok=$((nctx / 4 < 32768 ? nctx / 4 : 32768))
+
+        cat >"$pi_dir/models.json" <<EOF
+{
+  "providers": {
+    "llama-cpp": {
+      "baseUrl": "http://127.0.0.1:$port/v1",
+      "api": "openai-completions",
+      "apiKey": "none",
+      "compat": { "supportsDeveloperRole": false },
+      "models": [
+        {
+          "id": "$mid",
+          "name": "local (llama.cpp)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": $nctx,
+          "maxTokens": $mtok,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}
+EOF
+        echo "sbx: wrote models.json — model '$mid', context $nctx"
+        [[ $mid == local-model ]] && echo "sbx: llama.cpp not reachable on port $port, model id is a placeholder — fix it in $pi_dir/models.json" >&2
+    fi
+
+    if [[ ! -f $pi_dir/settings.json ]]; then
+        mid=$(grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' "$pi_dir/models.json" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        cat >"$pi_dir/settings.json" <<EOF
+{
+  "defaultProvider": "llama-cpp",
+  "defaultModel": "$mid",
+  "enableInstallTelemetry": false
+}
+EOF
+    fi
+fi
+
+# ---- claude bootstrap -------------------------------------------------------
+# Same idea as pi: install into the project's sandbox HOME, only what is missing.
+if [[ ${cmd[0]} == claude ]]; then
+    if ((offline)); then
+        echo "sbx: claude talks to api.anthropic.com — --offline has no route there." >&2
+        echo "     Use 'sbx -- claude', or 'sbx --offline -- pi' for the local model." >&2
+        exit 1
+    fi
+
+    cc_bin=$home/.local/bin/claude
+    sys_cc=$(command -v claude || true)
+    [[ -n $sys_cc ]] && sys_cc=$(readlink -f "$sys_cc")
+
+    if ((host_claude)); then
+        :   # already bound in read-only at /opt/claude/bin/claude
+    elif [[ $sys_cc == /usr/* ]]; then
+        :   # installed system-wide, already inside the read-only /usr
+    elif [[ ! -x $cc_bin ]]; then
+        echo "sbx: installing Claude Code into $home/.local ..."
+        bwrap "${bw[@]}" -- bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+        if [[ ! -x $cc_bin ]]; then
+            echo "sbx: install failed. Either run it again, use --host-claude to borrow" >&2
+            echo "     the host binary, or install via npm (needs node 22+):" >&2
+            echo "     sbx -- bash -c 'npm config set prefix \$HOME/.npm-global && npm install -g @anthropic-ai/claude-code'" >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -n ${ANTHROPIC_API_KEY-} && " ${SBX_ENV:-} " != *" ANTHROPIC_API_KEY "* ]]; then
+        echo "sbx: note: ANTHROPIC_API_KEY is not passed in; use SBX_ENV=\"ANTHROPIC_API_KEY\" to pass it" >&2
+    fi
+
+    # Claude Code's own bash sandbox is bubblewrap as well; strict nesting works
+    # because sbx mounts an unmasked /proc. See docs/agents.md if it ever breaks.
+    if [[ ! -f $home/.claude/settings.json ]]; then
+        mkdir -p "$home/.claude"
+        cat >"$home/.claude/settings.json" <<'EOF'
+{
+  "sandbox": {
+    "enabled": true
+  }
+}
+EOF
+        echo "sbx: wrote $home/.claude/settings.json"
+    fi
+
+    write_agent_memory "$home/.claude/CLAUDE.md"
+fi
+
+# ---- codex bootstrap --------------------------------------------------------
+# Same contract as claude: install into the project's sandbox HOME, only what is
+# missing. Login and config live in $home/.codex (CODEX_HOME defaults to ~/.codex).
+if [[ ${cmd[0]} == codex ]]; then
+    if ((offline)); then
+        echo "sbx: codex talks to OpenAI's API — --offline has no route there." >&2
+        echo "     Use 'sbx -- codex', or 'sbx --offline -- pi' for the local model." >&2
+        exit 1
+    fi
+
+    # The base sandbox points OPENAI_* at llama.cpp for pi. Codex must not pick
+    # that up, or it would send its requests to the local server with a fake key.
+    bw+=(--unsetenv OPENAI_BASE_URL)
+    if [[ " ${SBX_ENV:-} " == *" OPENAI_API_KEY "* && -n ${OPENAI_API_KEY-} ]]; then
+        bw+=(--setenv OPENAI_API_KEY "$OPENAI_API_KEY")
+    else
+        bw+=(--unsetenv OPENAI_API_KEY)
+    fi
+
+    cx_bin=$home/.npm-global/bin/codex
+    sys_cx=$(command -v codex || true)
+    [[ -n $sys_cx ]] && sys_cx=$(readlink -f "$sys_cx")
+
+    if [[ $sys_cx == /usr/* ]]; then
+        :   # installed system-wide, already inside the read-only /usr
+    elif [[ ! -x $cx_bin ]]; then
+        command -v npm >/dev/null || { echo "sbx: codex install needs npm on the host" >&2; exit 1; }
+        echo "sbx: installing Codex into $home/.npm-global ..."
+        # No --ignore-scripts: the package may fetch its platform binary in a
+        # postinstall step, like Claude Code's npm package.
+        bwrap "${bw[@]}" -- bash -c 'npm config set prefix "$HOME/.npm-global" && npm install -g @openai/codex' \
+            || exit 1
+        if [[ ! -x $cx_bin ]]; then
+            echo "sbx: codex install failed — run it again, or check 'sbx -- npm install -g @openai/codex' output" >&2
+            exit 1
+        fi
+    fi
+
+    write_agent_memory "$home/.codex/AGENTS.md"
+
+    # analytics=false also turns off the default statsig metrics exporter.
+    if [[ ${SBX_TELEMETRY:-0} != 1 && ! -f $home/.codex/config.toml ]]; then
+        cat >"$home/.codex/config.toml" <<'EOF'
+[analytics]
+enabled = false
+
+[feedback]
+enabled = false
+EOF
+        echo "sbx: wrote $home/.codex/config.toml"
+    fi
+
+    if [[ ! -f $home/.codex/auth.json && ${cmd[1]-} != login && " ${SBX_ENV:-} " != *" OPENAI_API_KEY "* ]]; then
+        echo "sbx: codex is not logged in for this project yet. Run once:" >&2
+        echo "     sbx -- codex login --device-auth" >&2
+    fi
+fi
+
+# ---- run --------------------------------------------------------------------
+if ((offline)); then
+    printf -v q '%q ' "${cmd[@]}"
+    inner="socat TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/tmp/llama.sock >/dev/null 2>&1 & "
+    for p in "${pub_ports[@]}"; do
+        inner+="socat UNIX-LISTEN:/run/sbx-pub/$p.sock,fork,mode=600 TCP:127.0.0.1:$p >/dev/null 2>&1 & "
+    done
+    bwrap "${bw[@]}" -- bash -c "$inner exec $q"
+else
+    bwrap "${bw[@]}" -- "${cmd[@]}"
+fi
+exit $?
