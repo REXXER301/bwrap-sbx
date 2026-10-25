@@ -12,6 +12,10 @@ libraries and certificates work inside without installing anything. Your home di
 other drives and host processes are not visible. The network is shared unless you pass
 `--offline`.
 
+> **Not a security guarantee.** sbx reduces the blast radius of agents and untrusted code,
+> but it is a namespace boundary, not a VM. Read the [threat model](#threat-model) before
+> relying on it.
+
 Minimal overhead with one bash script, no daemon, image or root. Startup takes a few milliseconds.
 
 ## What it does
