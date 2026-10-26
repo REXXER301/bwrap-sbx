@@ -16,13 +16,13 @@ other drives and host processes are not visible. The network is shared unless yo
 > **Not a security guarantee.** sbx reduces the risk of agents
 > and untrusted code, but it is **not** a full VM. See [threat model](#threat-model).
 
-Minimal overhead with one bash script, no daemon, image or root. Startup takes a few milliseconds.
+Minimal overhead with one bash script: no daemon, image or root.
 
 ## What it does
 
 `sbx` starts a command in fresh Linux namespaces (user, mount, pid, network, ipc, uts) with
 an empty root filesystem, then adds exactly these mounts. Anything not listed, such as
-`/home`, `/root`, `/mnt` (e.g. Windows drives on WSL), `/media` or `/opt`, doesn't exist inside:
+`/home`, `/root`, `/mnt` (e.g. Windows drives on WSL), `/media` or `/opt`, does not exist inside:
 
 | Path inside | What it is |
 |---|---|
@@ -116,15 +116,14 @@ Details, generated configs, telemetry and disk use: [docs/agents.md](docs/agents
 
 ## Other software (e.g. ComfyUI)
 
-sbx works for pretty much anything. For software that runs code you don't trust, install online
-and then run offline, with only the web UI published:
+sbx should work for pretty much anything. For software that runs code you do not trust, install online
+and then run using the offline flag, with only the web UI published:
 
 ```bash
 sbx --offline --gpu --no-userns --ro ~/models --publish 8188 -- .venv/bin/python main.py
 ```
 
 Full walkthrough, including LAN exposure: [docs/wsl2.md § 6](docs/wsl2.md#6-web-uis-with-untrusted-code-eg-comfyui).
-The commands are the same on native Linux; skip the Windows firewall part.
 
 ## Threat model
 
@@ -138,8 +137,7 @@ There are two different cases, with different settings:
 | Nested userns | needed for the agent's own sandbox | `--no-userns` |
 | Typical run | `sbx -- claude` | `sbx --offline --no-userns --publish 8188 -- …` |
 
-For agents, sbx limits the blast radius to the project directory. For hostile code, it raises
-the bar a lot, but read the next section.
+For agents, sbx limits the potential damage to the project directory. For hostile code, it reduces the risk, but read the next section.
 
 ### What this does not protect against
 
@@ -175,7 +173,7 @@ the bar a lot, but read the next section.
 - **`--share-auth`.** It makes the host's `~/.claude.json` writable from inside. That file
   can define MCP servers, which later run *outside* the sandbox when you use `claude`
   normally. Only use it for agents you trust, never for untrusted software.
-- **Reading system files in `/usr` and `/etc`.** The sandbox can't change them, but it can
+- **Reading system files in `/usr` and `/etc`.** The sandbox cannot change them, but it can
   read them as your own user would. Files only root can read, like `/etc/shadow`, stay
   unreadable. The ordinary system config in `/etc` (hostname, `/etc/fstab`, installed
   software) is visible, which is normally harmless. It only matters if a secret was put in a
@@ -193,16 +191,16 @@ the bar a lot, but read the next section.
 | **bubblejail / flatpak** | Desktop-app oriented, with persistent per-app profiles. sbx is per-directory and one command. |
 | **Docker / Podman / devcontainers** | Separate userland image, overlay storage, ~1 s startup, the CUDA stack reproduced inside. sbx reuses the host `/usr` read-only, so the toolchain is already correct. |
 | **VM / microVM** | Much stronger boundary (kernel exploits) at the cost of images, boot time and GPU passthrough. Use one for fully hostile code. |
-| **This Project** | Significantly lower overhead than Docker, Podman and VM solutions: no image, no daemon, no root, and the host's own tools. Easier than firejail profiles or a hand-written bwrap command, and very quick to set up and use: install one script, `cd` into a project, run `sbx`. The trade-off is a weaker boundary than a VM, and the host's `/usr` and `/etc` stay readable. |
+| **This Project** | Significantly lower overhead than Docker, Podman and VM solutions: no image, no daemon, no root, while using the host's own tools. Easier than firejail profiles or a hand-written bwrap command, and very quick to set up and use: install one script, `cd` into a project, run `sbx`. The trade-off is a weaker isolation than a VM, and the host's `/usr` and `/etc` stay readable. |
 
 ## Status
 
 Provided as-is. Issues and PRs are welcome, but there is no support commitment.
 
-Written with AI assistance; tested by me on CachyOS and Ubuntu 24.04/Arch under WSL2.
+Developed with AI assistance, tested manually on CachyOS and WSL2 (Ubuntu 24.04) as well as with automated tests (see [tests](/tests)).
 
 The tools sbx can download and run (Claude Code, Codex, pi) are third-party software
-under their own licenses and terms. sbx only installs them into your project.
+under their own licenses and terms.
 
 ## License
 
