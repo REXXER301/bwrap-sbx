@@ -68,6 +68,9 @@ Platform guides with verification steps:
 
 - **Linux edition** (developed on CachyOS/Arch): [docs/cachyos.md](docs/cachyos.md)
 - **WSL2** (Ubuntu 24.04, Arch): [docs/wsl2.md](docs/wsl2.md)
+- **Windows quick start:** download `sbx-windows-<version>.zip` from the
+  [latest release](https://github.com/REXXER301/bwrap-sbx/releases/latest) and run
+  `quickstart.cmd`. See [windows/README.md](windows/README.md)
 
 The same script runs on both. It detects WSL and adds `/dev/dxg` for the GPU and the DNS
 symlink fix where needed.

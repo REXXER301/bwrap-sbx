@@ -1,12 +1,15 @@
-# Runs the sbx isolation suite (tests/run.sh) in rootless podman.
+# Runs the sbx isolation suite (tests/run.sh) in rootless podman. On a v* tag,
+# a release with the Windows quick start zip is published once the suite passes.
 name: isolation tests
 
 on:
   push:
     branches: [main]
-    paths: [sbx, "tests/**", .github/workflows/isolation-tests.yml]
+    # Path filters don't apply to tag pushes, so every v* tag runs.
+    tags: ["v*"]
+    paths: [sbx, "tests/**", "windows/**", .github/workflows/isolation-tests.yml]
   pull_request:
-    paths: [sbx, "tests/**", .github/workflows/isolation-tests.yml]
+    paths: [sbx, "tests/**", "windows/**", .github/workflows/isolation-tests.yml]
   workflow_dispatch:
 
 permissions:
@@ -35,3 +38,57 @@ jobs:
 
       - name: Run isolation suite
         run: tests/run.sh
+
+  package-windows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Flat layout: quickstart.ps1 finds sbx next to itself, so the user
+      # unzips and double-clicks quickstart.cmd.
+      - name: Build zip
+        run: |
+          name="sbx-windows-${GITHUB_REF_NAME//\//-}"
+          dir="dist/$name"
+          mkdir -p "$dir/docs"
+          cp windows/quickstart.cmd windows/quickstart.ps1 windows/README.md \
+             sbx LICENSE SECURITY.md "$dir/"
+          cp docs/wsl2.md "$dir/docs/"
+          sed -i 's|\.\./docs/|docs/|g' "$dir/README.md"
+          # cmd.exe needs CRLF; sbx needs LF (the script strips CR anyway).
+          sed -i 's/\r*$/\r/' "$dir"/quickstart.cmd "$dir"/quickstart.ps1
+          sed -i 's/\r$//' "$dir/sbx"
+          (cd dist && zip -rX "$name.zip" "$name" && sha256sum "$name.zip" > SHA256SUMS)
+          echo "ZIP=dist/$name.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbx-windows
+          path: |
+            ${{ env.ZIP }}
+            dist/SHA256SUMS
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [isolation, package-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbx-windows
+          path: dist
+
+      # Tags with a "-" (v1.2.0-rc1) become prereleases.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/SHA256SUMS \
+            --verify-tag --title "$GITHUB_REF_NAME" --generate-notes "${flags[@]}"
