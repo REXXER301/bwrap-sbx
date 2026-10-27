@@ -1,6 +1,9 @@
 # `sbx` on Windows: quick start
 
-Double-click `quickstart.cmd`, or run `.\quickstart.cmd` in a terminal. It:
+Download `sbx-windows-<version>.zip` from the
+[latest release](https://github.com/REXXER301/bwrap-sbx/releases/latest), unzip it, then
+double-click `quickstart.cmd`, or run `.\quickstart.cmd` in a terminal. From a git checkout,
+run `windows\quickstart.cmd`. It:
 
 1. Installs or updates WSL, without a default Ubuntu. This needs one admin prompt. If
    Windows then needs a restart, the script says so: restart and run it again.
@@ -23,7 +26,7 @@ sbx -- claude
 The script ends with warnings about what the sandbox does and doesn't protect against. Read
 them.
 
-- **Update:** run the script again.
+- **Update:** run the script from the newest release zip again.
 - **Remove:** `wsl --unregister sbx`. This deletes everything inside the distro, including
   your projects in it.
 - **Options:** `quickstart.cmd -Distro <name> -Image <wsl distro>`

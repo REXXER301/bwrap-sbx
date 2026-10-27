@@ -28,6 +28,10 @@ Short notes on choices that aren't obvious from the code.
   this with `whoami.exe`. The distro exists only for sbx, so losing `code .` there is
   acceptable.
 - **Re-running the script updates everything.** Each step checks what's already done.
+- **Shipped as a release zip.** Pushing a `v*` tag runs the isolation suite, and only if it
+  passes, CI publishes a GitHub release with `sbx-windows-<tag>.zip` and `SHA256SUMS`.
+  The zip holds the quick start scripts and the tested `sbx` side by side, so the script
+  installs that copy instead of whatever is on `main`. Tags with a `-` are prereleases.
 
 ## Claude Code login
 

@@ -13,7 +13,9 @@ param(
 
 $env:WSL_UTF8 = '1'                                  # wsl.exe prints UTF-16 otherwise
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
-$repoSbx = Join-Path (Split-Path $PSScriptRoot -Parent) 'sbx'
+# sbx sits next to this script in a release zip, one folder up in a git checkout.
+$repoSbx = @((Join-Path $PSScriptRoot 'sbx'), (Join-Path (Split-Path $PSScriptRoot -Parent) 'sbx')) |
+    Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
 $rawSbx = 'https://raw.githubusercontent.com/REXXER301/bwrap-sbx/main/sbx'
 
 function Step([string]$msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
@@ -82,7 +84,7 @@ $user = $env:USERNAME.ToLower() -replace '[^a-z0-9_-]', ''
 if ($user -notmatch '^[a-z_][a-z0-9_-]{0,30}$' -or $user -eq 'root') { $user = 'sbx' }
 
 $src = ''
-if (Test-Path $repoSbx -PathType Leaf) {
+if ($repoSbx) {
     $src = (& wsl.exe -d $Distro -e wslpath -a ($repoSbx -replace '\\', '/')) -join ''
 }
 
@@ -177,6 +179,6 @@ if ($interopDisabled) {
     Warn "WSL interop is off in '$Distro', so 'code .' and 'explorer.exe' don't work from inside it."
 }
 if (-not $src) {
-    Warn 'sbx was downloaded from the main branch on GitHub, not from a release you checked.'
+    Warn 'sbx was downloaded from the main branch on GitHub, not from a release zip.'
 }
 Warn "Ubuntu's Node may be too old for pi; Claude Code doesn't need Node. See docs/wsl2.md."
