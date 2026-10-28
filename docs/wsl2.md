@@ -65,7 +65,7 @@ The script already handles everything WSL needs, so there's nothing to patch:
   passed through. Pass more, API keys included, with `SBX_ENV`, e.g.
   `SBX_ENV="HF_TOKEN" sbx -- pi`.
 - It refuses to run in, or `--ro` share, `/`, `/tmp`, or your home directory and its
-  parents, and warns if the project is on a Windows drive.
+  parents, and notes once (first run) if the project is on a Windows drive.
 
 ## 4. Verify (once)
 
