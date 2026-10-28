@@ -41,6 +41,10 @@ an empty root filesystem, then adds exactly these mounts. Anything not listed, s
 
 - **The environment is cleared.** Only `TERM`, `LANG`, `COLORTERM` and what sbx sets itself
   get through. API keys too must be passed explicitly: `SBX_ENV="ANTHROPIC_API_KEY HF_TOKEN"`.
+- **No git identity or GitHub login.** `~/.gitconfig`, SSH keys and `gh` tokens stay
+  outside, on purpose: an agent shouldn't get your whole GitHub account. Commits inside need
+  an author (the default agent instructions say to reuse the last commit's), and you push
+  from the host.
 - **No telemetry by default.** Telemetry, error reporting and feedback prompts are off for
   Claude Code, Codex, pi and common tools (`DO_NOT_TRACK=1`). Auto-updates stay on.
   `SBX_TELEMETRY=1` allows telemetry. Details: [docs/agents.md](docs/agents.md#telemetry-off-by-default).
