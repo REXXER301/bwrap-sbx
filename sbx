@@ -349,12 +349,14 @@ write_agent_memory() {
     [[ -f $1 ]] && return
     mkdir -p "$(dirname "$1")"
     local tpl=${XDG_CONFIG_HOME:-$HOME/.config}/sbx/AGENTS.md
+    # No ~/.gitconfig or GitHub credentials inside, by design.
+    local git_note='No git identity or GitHub credentials here. When committing, reuse the author of the last commit if there is one (git -c user.name=... -c user.email=... commit), otherwise ask. Pushing happens on the host.'
     if [[ -f $tpl ]]; then
         cp "$tpl" "$1"
     elif ((is_wsl)); then
-        printf 'Shell: %s inside a bubblewrap sandbox in WSL2 (Linux userland, no Windows drives visible).\nOnly the project directory is writable.\n' "${sbx_shell##*/}" >"$1"
+        printf 'Shell: %s inside a bubblewrap sandbox in WSL2 (Linux userland, no Windows drives visible).\nOnly the project directory is writable.\n%s\n' "${sbx_shell##*/}" "$git_note" >"$1"
     else
-        printf 'Shell: %s inside a bubblewrap sandbox. Only the project directory is writable.\n' "${sbx_shell##*/}" >"$1"
+        printf 'Shell: %s inside a bubblewrap sandbox. Only the project directory is writable.\n%s\n' "${sbx_shell##*/}" "$git_note" >"$1"
     fi
     echo "sbx: wrote $1"
 }
