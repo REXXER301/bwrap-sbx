@@ -94,10 +94,6 @@ if unsafe_path "$root"; then
     exit 1
 fi
 
-case $root in
-    /mnt/?/*) ((is_wsl)) && echo "sbx: note: project is on a Windows drive ($root) — works, but file I/O is slow there" >&2 ;;
-esac
-
 if [[ ! -d $home ]]; then
     mkdir -p "$home"
     echo "sbx: created $home"
@@ -106,6 +102,19 @@ fi
 # .sbx-home collects logins and tokens; keep it out of git without relying on
 # the project's own .gitignore.
 [[ -e $home/.gitignore ]] || printf '*\n' >"$home/.gitignore"
+
+# Non-critical hints are shown once per project; a marker in .sbx-home/.sbx-notes
+# silences them afterwards (delete the folder to see them again).
+note_once() {
+    local marker=$home/.sbx-notes/$1
+    [[ -e $marker ]] && return
+    echo "sbx: note: $2" >&2
+    mkdir -p "${marker%/*}" && : >"$marker"
+}
+
+case $root in
+    /mnt/?/*) ((is_wsl)) && note_once windows-drive "project is on a Windows drive ($root) — works, but file I/O is slow there" ;;
+esac
 
 # Prompt markers for the interactive shell; only written if absent.
 [[ -f $home/.bashrc ]] || printf '%s\n' "PS1='(sbx) \\w \\\$ '" >"$home/.bashrc"
@@ -445,7 +454,7 @@ if [[ ${cmd[0]} == claude ]]; then
     fi
 
     if [[ -n ${ANTHROPIC_API_KEY-} && " ${SBX_ENV:-} " != *" ANTHROPIC_API_KEY "* ]]; then
-        echo "sbx: note: ANTHROPIC_API_KEY is not passed in; use SBX_ENV=\"ANTHROPIC_API_KEY\" to pass it" >&2
+        note_once anthropic-api-key "ANTHROPIC_API_KEY is not passed in; use SBX_ENV=\"ANTHROPIC_API_KEY\" to pass it"
     fi
 
     # Claude Code's own bash sandbox is bubblewrap as well; strict nesting works
